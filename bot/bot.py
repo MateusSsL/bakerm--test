@@ -1,4 +1,3 @@
-
 import discord
 import os
 import asyncio
@@ -15,8 +14,7 @@ import weakref
 import gc
 
 INSTRUCOES_CANAL_ID = 1394566723448995982
-BOASVINDAS_MSG_ID_FILE = "boasvindas_msg_id.txt"
-
+BOASVINDAS_MSG_ID_FILE = "bot/mensagens/boasvindas_msg_id.txt"
 # Carrega variáveis de ambiente
 load_dotenv()
 RAIDERIO_COOLDOWN_SECONDS = 300
@@ -347,7 +345,7 @@ class ConfirmarCadastroView(View):
         
         try:
             await interaction.response.defer(ephemeral=True)
-            async with aiosqlite.connect("raiderio.db") as db:
+            async with aiosqlite.connect("data/raiderio.db") as db:
                 # Verifica se o personagem já existe para outro usuário
                 cursor = await db.execute(
                     "SELECT user_id FROM jogadores WHERE personagem_nome = ? AND user_id != ?",
@@ -455,7 +453,7 @@ class GerenciarPersonagemView(View):
 
     async def _atualizar_disponibilidade(self, interaction, disponibilidade):
         try:
-            async with aiosqlite.connect("raiderio.db") as db:
+            async with aiosqlite.connect("data/raiderio.db") as db:
                 await db.execute(
                     "UPDATE jogadores SET disponibilidade = ? WHERE personagem_nome = ? AND user_id = ?",
                     (disponibilidade, self.personagem_nome, str(interaction.user.id))
@@ -500,7 +498,7 @@ class GerenciarPersonagemView(View):
             return
             
         try:
-            async with aiosqlite.connect("raiderio.db") as db:
+            async with aiosqlite.connect("data/raiderio.db") as db:
                 await db.execute(
                     "DELETE FROM jogadores WHERE personagem_nome = ? AND user_id = ?",
                     (self.personagem_nome, str(interaction.user.id))
@@ -546,7 +544,7 @@ class GerenciarPersonagemView(View):
         raiderio_cooldowns[user_key] = now
 
         try:
-            async with aiosqlite.connect("raiderio.db") as db:
+            async with aiosqlite.connect("data/raiderio.db") as db:
                 cursor = await db.execute(
                     "SELECT raiderio_url FROM jogadores WHERE personagem_nome = ? AND user_id = ?",
                     (self.personagem_nome, str(interaction.user.id))
@@ -563,7 +561,7 @@ class GerenciarPersonagemView(View):
                 url = row[0]
 
             # Importa função específica para evitar import circular
-            from raiderio_api import obter_score_raiderio
+            from bot.raiderio_api import obter_score_raiderio
             score = await obter_score_raiderio(url)
             
             if score is None:
@@ -574,7 +572,7 @@ class GerenciarPersonagemView(View):
                 return
 
             hoje = datetime.now().date().isoformat()
-            async with aiosqlite.connect("raiderio.db") as db:
+            async with aiosqlite.connect("data/raiderio.db") as db:
                 await db.execute(
                     "UPDATE jogadores SET raiderio_score = ?, ultima_atualizacao = ? WHERE personagem_nome = ? AND user_id = ?",
                     (score, hoje, self.personagem_nome, str(interaction.user.id))
@@ -611,7 +609,7 @@ class Bot(commands.Bot):
         self.cleanup_task = None
 
     async def setup_hook(self):
-        self.db_conn = await aiosqlite.connect("raiderio.db")
+        self.db_conn = await aiosqlite.connect("data/raiderio.db")
         await self.db_conn.execute("""
             CREATE TABLE IF NOT EXISTS jogadores (
                 user_id TEXT PRIMARY KEY,
@@ -735,7 +733,7 @@ class PersonagemButton(Button):
 
     async def callback(self, interaction: discord.Interaction):
         try:
-            async with aiosqlite.connect("raiderio.db") as db:
+            async with aiosqlite.connect("data/raiderio.db") as db:
                 cursor = await db.execute(
                     "SELECT nome, funcao, armadura, disponibilidade, raiderio_url, "
                     "raiderio_score, personagem_nome, personagem_classe, ultima_atualizacao "
