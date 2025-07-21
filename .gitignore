@@ -1,0 +1,13 @@
+# .gitignore para o projeto Python
+# Ignora a pasta da virtualenv
+venv/
+
+# Ignora variáveis de ambiente sensíveis
+.env
+
+# Ignora caches e arquivos temporários
+__pycache__/
+*.pyc
+*.log
+*.sqlite3
+.vscode/
