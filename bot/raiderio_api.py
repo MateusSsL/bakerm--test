@@ -1,30 +1,42 @@
 import aiohttp
-from typing import Optional
+import re
 
-async def obter_score_raiderio(url: str) -> Optional[float]:
-    """Obtém score M+ atual da API do Raider.IO"""
+async def obter_score_raiderio(url: str) -> tuple:
+    """
+    Obtém informações do personagem no Raider.IO
+    Retorna (score, classe) ou (None, None) se erro
+    """
     try:
-        if "raider.io/characters/" not in url:
-            return None
+        # Extrai região/reino/nome do URL
+        pattern = r"characters/(\w+)/([^/]+)/([^/]+)"
+        match = re.search(pattern, url)
+        if not match:
+            return None, None
             
-        parts = url.rstrip("/").split("/")
-        if len(parts) < 3:
-            return None
-            
-        region, realm, name = parts[-3], parts[-2], parts[-1]
+        region, realm, name = match.groups()
+        
+        # URL da API do Raider.IO
+        api_url = f"https://raider.io/api/v1/characters/profile"
+        params = {
+            "region": region,
+            "realm": realm,
+            "name": name,
+            "fields": "mythic_plus_scores_by_season:current,class"
+        }
         
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f"https://raider.io/api/v1/characters/profile"
-                f"?region={region}&realm={realm}&name={name}"
-                f"&fields=mythic_plus_scores_by_season:current"
-            ) as resp:
-                if resp.status != 200:
-                    return None
+            async with session.get(api_url, params=params) as response:
+                if response.status != 200:
+                    return None, None
+                    
+                data = await response.json()
                 
-                data = await resp.json()
-                return data["mythic_plus_scores_by_season"][0]["scores"]["all"]
+                # Pega score da season atual
+                current_score = data.get("mythic_plus_scores_by_season", [{}])[0].get("scores", {}).get("all", 0)
+                class_name = data.get("class")
                 
-    except (aiohttp.ClientError, KeyError, IndexError, ValueError) as e:
-        print(f"[Raider.IO API Error] {e}")
-        return None
+                return float(current_score), class_name
+                
+    except Exception as e:
+        print(f"[ERRO RAIDERIO] {e}")
+        return None, None
