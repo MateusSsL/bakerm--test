@@ -41,7 +41,7 @@ async def buscar_disponiveis(db_conn: aiosqlite.Connection) -> List[Tuple]:
     return await cursor.fetchall()
 
 async def atualizar_raiderio(
-    db_conn: aiosqlite.Connection,
+    db_conn: aiosqlite.Connection(),
     user_id: str,
     nome: str,
     url: str,
