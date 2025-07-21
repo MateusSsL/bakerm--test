@@ -13,6 +13,15 @@ from time import time
 import weakref
 import gc
 from raiderio_api import obter_score_raiderio
+from mensagens import (
+    BOAS_VINDAS, CADASTRO_SUCESSO, ERRO_CADASTRO, LIMITE_PERSONAGENS, FUNCAO_INVALIDA,
+    RATE_LIMIT, PERSONAGEM_EXISTENTE, RAIDERIO_INVALIDO, PERFIL_VAZIO, CADASTRO_EM_ANDAMENTO,
+    CADASTRO_CANCELADO, PERSONAGEM_REMOVIDO, PERSONAGEM_NAO_ENCONTRADO, ERRO_GERAL,
+    ERRO_ATUALIZAR_RAIDERIO, ERRO_ATUALIZAR_DISPONIBILIDADE, ERRO_DELETAR_PERSONAGEM,
+    ERRO_CARREGAR_PERSONAGEM, ERRO_INICIAR_CADASTRO, SISTEMA_SOBRECARGADO, CADASTRO_CONCLUIDO,
+    MUITAS_INTERACOES, SESSAO_EXPIRADA, SEM_PERMISSAO_VIEW, AGUARDE_BOTAO, AGUARDE_RAIDERIO,
+    NAO_POSSIVEL_ATUALIZAR_SCORE, LINK_RAIDERIO_NAO_ENCONTRADO
+)
 
 INSTRUCOES_CANAL_ID = 1394566723448995982
 BOASVINDAS_MSG_ID_FILE = "bot/mensagens/boasvindas_msg_id.txt"
@@ -95,6 +104,27 @@ async def verificar_rate_limit(user_id: int, acao: str) -> bool:
         
     return now - raiderio_cooldowns[key] < RAIDERIO_COOLDOWN_SECONDS
 
+# Add this function near the top of your file with other helper functions
+def get_armor_type(class_name: str) -> str:
+    """
+    Determines armor type based on character class
+    """
+    cloth_classes = ["Mage", "Priest", "Warlock"]
+    leather_classes = ["Demon Hunter", "Druid", "Monk", "Rogue"]
+    mail_classes = ["Hunter", "Shaman", "Evoker"]
+    plate_classes = ["Death Knight", "Paladin", "Warrior"]
+    
+    if class_name in cloth_classes:
+        return "Cloth"
+    elif class_name in leather_classes:
+        return "Leather"
+    elif class_name in mail_classes:
+        return "Mail"
+    elif class_name in plate_classes:
+        return "Plate"
+    else:
+        return "Unknown"
+
 # --- CLASSES DE VIEW COM PROTEÇÃO MELHORADA ---
 
 class PrivateView(View):
@@ -172,7 +202,7 @@ class CadastroView(PrivateView):
                 
                 if count >= 4:
                     return await interaction.response.send_message(
-                        "❌ Você já atingiu o limite de 4 personagens cadastrados.",
+                        LIMITE_PERSONAGENS,
                         ephemeral=True
                     )
 
@@ -183,14 +213,25 @@ class CadastroView(PrivateView):
         except Exception as e:
             print(f"[ERRO INICIAR_CADASTRO] {e}")
             await interaction.response.send_message(
-                "❌ Erro ao iniciar cadastro. Tente novamente.",
+                ERRO_INICIAR_CADASTRO,
                 ephemeral=True
             )
 
     @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.danger)
     async def cancelar(self, interaction: discord.Interaction, button: Button):
+        # Desabilita os botões
+        for item in self.children:
+            item.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass  # Ignora erro se a mensagem não existir mais
+
+        await interaction.response.send_message(
+            CADASTRO_CANCELADO,
+            ephemeral=True
+        )
         active_cadastros.pop(interaction.user.id, None)
-        await interaction.message.delete()
 
 class CadastroModal(Modal, title="Cadastro de Personagem"):
     def __init__(self, cadastro_view):
@@ -226,6 +267,7 @@ class CadastroModal(Modal, title="Cadastro de Personagem"):
         try:
             # Validar entrada
             nick = validar_entrada_usuario(self.nick_input.value)
+            nick = nick.capitalize()  # ou nick.title() para cada palavra
             
             # Normaliza a função para aceitar qualquer formato
             funcao = self.funcao_input.value.lower().strip()
@@ -237,10 +279,7 @@ class CadastroModal(Modal, title="Cadastro de Personagem"):
                 funcao = "DPS"
             else:
                 return await interaction.response.send_message(
-                    "❌ Função inválida! Use:\n"
-                    "• Tank (ou tk)\n"
-                    "• Healer (ou heal)\n"
-                    "• DPS\n",
+                    FUNCAO_INVALIDA,
                     ephemeral=True
                 )
                 
@@ -249,14 +288,14 @@ class CadastroModal(Modal, title="Cadastro de Personagem"):
             # Validar função
             if funcao not in ["Tank", "Healer", "DPS"]:
                 return await interaction.response.send_message(
-                    "❌ Função inválida! Use Tank, Healer ou DPS.",
+                    FUNCAO_INVALIDA,
                     ephemeral=True
                 )
             
             # Verificar rate limit
             if await verificar_rate_limit(interaction.user.id, "cadastro"):
                 return await interaction.response.send_message(
-                    "⏳ Aguarde alguns minutos antes de tentar novamente.",
+                    RATE_LIMIT,
                     ephemeral=True
                 )
             
@@ -269,31 +308,33 @@ class CadastroModal(Modal, title="Cadastro de Personagem"):
                 count = (await cursor.fetchone())[0]
                 if count >= 4:  # Permite até 4 personagens
                     return await interaction.response.send_message(
-                        "❌ Você já atingiu o limite de 4 personagens cadastrados.",
+                        LIMITE_PERSONAGENS,
                         ephemeral=True
                     )
                 
                 # Verificar se personagem já existe
                 cursor = await db.execute(
-                    "SELECT user_id FROM jogadores WHERE personagem_nome = ?",
+                    "SELECT user_id FROM jogadores WHERE LOWER(personagem_nome) = LOWER(?)",
                     (nick,)
                 )
                 existing = await cursor.fetchone()
                 if existing and str(existing[0]) != str(interaction.user.id):
                     return await interaction.response.send_message(
-                        "❌ Este personagem já está cadastrado por outro usuário.",
+                        PERSONAGEM_EXISTENTE,
                         ephemeral=True
                     )
             
             # Validar com Raider.IO e obter score atual
-            score, classe = await obter_score_raiderio(raiderio_url)
+            score, classe, server = await obter_score_raiderio(raiderio_url)
             if score is None or classe is None:
                 return await interaction.response.send_message(
-                    "❌ Erro ao validar perfil no Raider.IO. Verifique o link.",
+                    RAIDERIO_INVALIDO,
                     ephemeral=True
                 )
-            
-            # Criar embed de confirmação
+
+            armadura = get_armor_type(classe)
+
+            # Update the confirmation embed to show armor type
             embed = discord.Embed(
                 title="📝 Confirmar Cadastro",
                 description="Verifique os dados antes de confirmar:",
@@ -302,16 +343,20 @@ class CadastroModal(Modal, title="Cadastro de Personagem"):
             embed.add_field(name="Personagem", value=nick, inline=True)
             embed.add_field(name="Classe", value=classe, inline=True)
             embed.add_field(name="Função", value=funcao, inline=True)
+            embed.add_field(name="Armadura", value=f"{armadura}", inline=True)  # Added this line
             embed.add_field(name="Score M+", value=f"{score:.1f}", inline=True)
             embed.add_field(name="Raider.IO", value=f"[Link]({raiderio_url})", inline=False)
-            
-            # Salvar dados temporariamente
+            embed.add_field(name="Servidor", value=server, inline=True)
+
+            # Store armor type in cadastro_view
+            self.cadastro_view.armadura = armadura
             self.cadastro_view.personagem_nome = nick
             self.cadastro_view.personagem_classe = classe
             self.cadastro_view.funcao = funcao
             self.cadastro_view.raiderio_url = raiderio_url
             self.cadastro_view.raiderio_score = score
-            
+            self.cadastro_view.personagem_server = server  # <-- ADICIONE ESTA LINHA
+
             await interaction.response.send_message(
                 embed=embed,
                 view=ConfirmarCadastroView(interaction, self.cadastro_view),
@@ -321,7 +366,7 @@ class CadastroModal(Modal, title="Cadastro de Personagem"):
         except Exception as e:
             print(f"[ERRO CADASTRO] {e}")
             await interaction.response.send_message(
-                "❌ Erro ao processar cadastro. Tente novamente.",
+                ERRO_GERAL,
                 ephemeral=True
             )
 
@@ -335,20 +380,28 @@ class ConfirmarCadastroView(View):
     @discord.ui.button(label="✅ Confirmar Cadastro", style=discord.ButtonStyle.success)
     async def confirmar(self, interaction: discord.Interaction, button: Button):
         if self.confirmado:
-            await interaction.response.send_message("❌ Cadastro já foi processado.", ephemeral=True)
-            return
-            
+            return await interaction.response.send_message(
+                "❌ Cadastro já foi processado.", 
+                ephemeral=True
+            )
         self.confirmado = True
-        
+
         try:
-            await interaction.response.defer(ephemeral=True)
+            # Primeiro desabilita os botões
+            for item in self.children:
+                item.disabled = True
+            try:
+                await interaction.message.edit(view=self)
+            except Exception:
+                pass  # Ignora erro se a mensagem não existir mais
+
+            # Insere no banco de dados
             async with aiosqlite.connect("data/raiderio.db") as db:
-                # Remove a cláusula ON CONFLICT e adiciona todos os campos necessários
                 await db.execute("""
                     INSERT INTO jogadores 
                     (user_id, nome, funcao, armadura, raiderio_url, raiderio_score, 
-                     personagem_nome, personagem_classe, disponibilidade, ultima_atualizacao)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
+                     personagem_nome, personagem_classe, personagem_server, disponibilidade, ultima_atualizacao)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
                 """, (
                     self.cadastro_view.user_id,
                     self.cadastro_view.nome,
@@ -357,46 +410,52 @@ class ConfirmarCadastroView(View):
                     self.cadastro_view.raiderio_url,
                     self.cadastro_view.raiderio_score,
                     self.cadastro_view.personagem_nome,
-                    self.cadastro_view.personagem_classe
+                    self.cadastro_view.personagem_classe,
+                    self.cadastro_view.personagem_server  # NOVO
                 ))
                 await db.commit()
 
-            await interaction.followup.send(
-                f"🎉 **Cadastro concluído com sucesso!**\n\n"
-                f"▸ **Personagem:** {self.cadastro_view.personagem_nome}\n"
-                f"▸ **Classe:** {self.cadastro_view.personagem_classe}\n"
-                f"▸ **Função:** {self.cadastro_view.funcao}\n"
-                f"▸ **Score M+:** {int(self.cadastro_view.raiderio_score)}\n\n"
-                f"Use `/perfil` para ver seu perfil completo.",
-                ephemeral=True
+            # Envia mensagem de sucesso
+            embed = discord.Embed(
+                title="✅ Cadastro Concluído!",
+                description=(
+                    f"**Personagem:** {self.cadastro_view.personagem_nome}\n"
+                    f"**Classe:** {self.cadastro_view.personagem_classe}\n"
+                    f"**Função:** {self.cadastro_view.funcao}\n"
+                    f"**Score M+:** {int(self.cadastro_view.raiderio_score)}\n\n"
+                    "Use `/perfil` para gerenciar seu personagem."
+                ),
+                color=discord.Color.green()
             )
-
-            # Edita mensagens e limpa registros
-            await interaction.message.edit(
-                content="✅ Cadastro concluído! Esta janela será fechada automaticamente.",
-                embed=None,
-                view=None
-            )
-
-            try:
-                await self.cadastro_view.interaction.edit_original_response(
-                    content="✅ Cadastro concluído! Use `/cadastrar` novamente para outro personagem.",
-                    embed=None,
-                    view=None
-                )
-            except Exception:
-                pass
-
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+            # Limpa o cadastro ativo
             active_cadastros.pop(interaction.user.id, None)
             
         except Exception as e:
             self.confirmado = False
-            print(f"ERRO NO CADASTRO: {str(e)}")
-            await interaction.followup.send(
-                f"❌ **Erro crítico:** Falha ao completar cadastro\n"
-                f"Por favor, tente novamente ou contate um administrador.",
+            print(f"[ERRO NO CADASTRO] {e}")
+            await interaction.response.send_message(
+                "❌ **Erro ao completar cadastro.** Tente novamente.",
                 ephemeral=True
             )
+
+    @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.danger)
+    async def cancelar(self, interaction: discord.Interaction, button: Button):
+        # Desabilita os botões
+        for item in self.children:
+            item.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass  # Ignora erro se a mensagem não existir mais
+        
+        await interaction.response.send_message(
+            CADASTRO_CANCELADO,
+            ephemeral=True
+        )
+        active_cadastros.pop(interaction.user.id, None)
 
 class GerenciarPersonagemView(View):
     def __init__(self, personagem_nome):
@@ -440,7 +499,7 @@ class GerenciarPersonagemView(View):
                 
                 cursor = await db.execute(
                     "SELECT nome, funcao, armadura, disponibilidade, raiderio_url, "
-                    "raiderio_score, personagem_nome, personagem_classe, ultima_atualizacao "
+                    "raiderio_score, personagem_nome, personagem_classe, ultima_atualizacao, personagem_server "
                     "FROM jogadores WHERE personagem_nome = ? AND user_id = ?",
                     (self.personagem_nome, str(interaction.user.id))
                 )
@@ -448,7 +507,8 @@ class GerenciarPersonagemView(View):
                 
             if not dados:
                 return await interaction.response.send_message(
-                    "❌ Personagem não encontrado.", ephemeral=True
+                    PERSONAGEM_NAO_ENCONTRADO,
+                    ephemeral=True
                 )
                 
             embed = self._criar_embed_perfil(dados)
@@ -456,13 +516,15 @@ class GerenciarPersonagemView(View):
         except Exception as e:
             print(f"[ERRO] _atualizar_disponibilidade: {e}")
             await interaction.response.send_message(
-                "❌ Erro ao atualizar disponibilidade.", ephemeral=True
+                ERRO_ATUALIZAR_DISPONIBILIDADE,
+                ephemeral=True
             )
 
     def _criar_embed_perfil(self, dados):
         embed = discord.Embed(title=f"Perfil de {self.personagem_nome}", color=discord.Color.blue())
         embed.add_field(name="Classe", value=dados[7] or "—", inline=True)
         embed.add_field(name="Função", value=dados[1] or "—", inline=True)
+        embed.add_field(name="Servidor", value=dados[9] or "—", inline=True)  # NOVO
         embed.add_field(name="Armadura", value=dados[2] or "—", inline=True)
         embed.add_field(name="Disponível", value="🟢 Sim" if dados[3] else "🔴 Não", inline=True)
         embed.add_field(name="Raider.IO", value=f"[Link]({dados[4]})" if dados[4] else "—", inline=False)
@@ -493,13 +555,14 @@ class GerenciarPersonagemView(View):
                 pass
                 
             await interaction.response.send_message(
-                f"❌ O personagem **{self.personagem_nome}** foi removido do seu perfil.",
+                PERSONAGEM_REMOVIDO(self.personagem_nome),
                 ephemeral=True
             )
         except Exception as e:
             print(f"[ERRO] deletar: {e}")
             await interaction.response.send_message(
-                "❌ Erro ao deletar personagem.", ephemeral=True
+                ERRO_DELETAR_PERSONAGEM,
+                ephemeral=True
             )
 
     @discord.ui.button(label="🔄 Atualizar Raider.IO", style=discord.ButtonStyle.primary)
@@ -538,8 +601,12 @@ class GerenciarPersonagemView(View):
                     
                 url = row[0]
 
-            score = await obter_score_raiderio(url)
-            
+            score_tuple = await obter_score_raiderio(url)
+            if isinstance(score_tuple, tuple):
+                score = score_tuple[0]
+            else:
+                score = score_tuple
+
             if score is None:
                 await interaction.response.send_message(
                     "❌ Não foi possível atualizar o score. Verifique o link Raider.IO.", 
@@ -557,7 +624,7 @@ class GerenciarPersonagemView(View):
 
                 cursor = await db.execute(
                     "SELECT nome, funcao, armadura, disponibilidade, raiderio_url, "
-                    "raiderio_score, personagem_nome, personagem_classe, ultima_atualizacao "
+                    "raiderio_score, personagem_nome, personagem_classe, ultima_atualizacao, personagem_server "
                     "FROM jogadores WHERE personagem_nome = ? AND user_id = ?",
                     (self.personagem_nome, str(interaction.user.id))
                 )
@@ -569,7 +636,8 @@ class GerenciarPersonagemView(View):
         except Exception as e:
             print(f"[ERRO] atualizar_raiderio: {e}")
             await interaction.response.send_message(
-                "❌ Erro ao atualizar Raider.IO.", ephemeral=True
+                ERRO_ATUALIZAR_RAIDERIO,
+                ephemeral=True
             )
 
 # --- BOT CLASS COM MELHORIAS ---
@@ -598,6 +666,7 @@ class Bot(commands.Bot):
                 raiderio_score REAL,
                 personagem_nome TEXT, 
                 personagem_classe TEXT,
+                personagem_server TEXT,  -- NOVO CAMPO
                 ultima_atualizacao TEXT,
                 UNIQUE(user_id, personagem_nome)
             )
@@ -635,7 +704,7 @@ async def cadastrar_slash(interaction: discord.Interaction):
     # Verifica se há muitas views ativas
     if active_views_count > MAX_ACTIVE_VIEWS:
         return await interaction.response.send_message(
-            "⚠️ Sistema temporariamente sobrecarregado. Tente novamente em alguns minutos.",
+            SISTEMA_SOBRECARGADO,
             ephemeral=True
         )
     
@@ -643,11 +712,11 @@ async def cadastrar_slash(interaction: discord.Interaction):
         if active_cadastros[interaction.user.id] == "concluido":
             active_cadastros.pop(interaction.user.id, None)
             return await interaction.response.send_message(
-                "✅ Cadastro concluído! Caso queira cadastrar outro personagem, use o comando `/cadastrar` novamente!",
+                CADASTRO_CONCLUIDO,
                 ephemeral=True
             )
         return await interaction.response.send_message(
-            "Você já tem um cadastro em andamento! Complete ou cancele antes de iniciar outro.",
+            CADASTRO_EM_ANDAMENTO,
             ephemeral=True
         )
         
@@ -662,7 +731,7 @@ async def cadastrar_slash(interaction: discord.Interaction):
     except Exception as e:
         print(f"[ERRO CADASTRAR] {e}")
         await interaction.response.send_message(
-            "❌ Erro ao iniciar cadastro. Tente novamente.",
+            ERRO_INICIAR_CADASTRO,
             ephemeral=True
         )
 
@@ -682,15 +751,7 @@ async def on_ready():
 
         embed = discord.Embed(
             title="🎉 Bem-vindo ao Cadastro do BakersM+!",
-            description=(
-                "Para participar dos grupos de Mythic+, você precisa se cadastrar!\n\n"
-                "📌 Informe:\n"
-                "➤ Sua **função** (Tank, Healer, DPS)\n"
-                "➤ Seu **Nick** do Personagem corretamente!\n"
-                "➤ Seu link do **Raider.IO** do seu personagem!\n\n"
-                "Use `/cadastrar` para começar!\n"
-                "Se você já se cadastrou, use `/perfil` e nos atualize sobre sua disponibilidade."
-            ),
+            description=BOAS_VINDAS,
             color=discord.Color.gold()
         )
         msg = await canal.send(embed=embed)
@@ -700,14 +761,12 @@ async def on_ready():
 class PersonagemButton(Button):
     def __init__(self, personagem_nome):
         self.personagem_nome = personagem_nome
-        # Começa com um label padrão
         super().__init__(
             style=discord.ButtonStyle.primary,
-            label=personagem_nome  # Label inicial temporário
+            label=personagem_nome
         )
 
     async def setup(self):
-        """Configura o botão de forma assíncrona"""
         try:
             async with aiosqlite.connect("data/raiderio.db") as db:
                 cursor = await db.execute(
@@ -717,16 +776,48 @@ class PersonagemButton(Button):
                 dados = await cursor.fetchone()
                 if dados:
                     self.funcao = dados[0]
-                    # Define o ícone baseado na função
                     icone = "🛡️" if self.funcao == "Tank" else \
-                           "💚" if self.funcao == "Healer" else \
-                           "⚔️" if self.funcao == "DPS" else "❔"
-                    
-                    # Atualiza o label do botão com o ícone
+                            "💚" if self.funcao == "Healer" else \
+                            "⚔️" if self.funcao == "DPS" else "❔"
                     self.label = f"{icone} {self.personagem_nome}"
-                    
         except Exception as e:
             print(f"[ERRO SETUP_BUTTON] {e}")
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            async with aiosqlite.connect("data/raiderio.db") as db:
+                cursor = await db.execute(
+                    "SELECT nome, funcao, armadura, disponibilidade, raiderio_url, "
+                    "raiderio_score, personagem_nome, personagem_classe, ultima_atualizacao, personagem_server "
+                    "FROM jogadores WHERE personagem_nome = ? AND user_id = ?",
+                    (self.personagem_nome, str(interaction.user.id))
+                )
+                dados = await cursor.fetchone()
+            if not dados:
+                return await interaction.response.send_message(
+                    PERSONAGEM_NAO_ENCONTRADO,
+                    ephemeral=True
+                )
+            embed = discord.Embed(title=f"Perfil de {self.personagem_nome}", color=discord.Color.blue())
+            embed.add_field(name="Classe", value=dados[7] or "—", inline=True)
+            embed.add_field(name="Função", value=dados[1] or "—", inline=True)
+            embed.add_field(name="Servidor", value=dados[9] or "—", inline=True)  # NOVO
+            embed.add_field(name="Armadura", value=dados[2] or "—", inline=True)
+            embed.add_field(name="Disponível", value="🟢 Sim" if dados[3] else "🔴 Não", inline=True)
+            embed.add_field(name="Raider.IO", value=f"[Link]({dados[4]})" if dados[4] else "—", inline=False)
+            embed.add_field(name="Score M+", value=str(int(dados[5])) if dados[5] else "—", inline=True)
+            embed.add_field(name="Última atualização", value=dados[8] or "—", inline=True)
+            await interaction.response.send_message(
+                embed=embed,
+                view=GerenciarPersonagemView(self.personagem_nome),
+                ephemeral=True
+            )
+        except Exception as e:
+            print(f"[ERRO PERSONAGEM_BUTTON] {e}")
+            await interaction.response.send_message(
+                ERRO_CARREGAR_PERSONAGEM,
+                ephemeral=True
+            )
 
 class ListaPersonagensView(View):
     def __init__(self, personagens, interaction):
@@ -752,10 +843,10 @@ async def perfil_slash(interaction: discord.Interaction):
     try:
         async with bot.db_lock:
             cursor = await bot.db_conn.execute(
-                "SELECT personagem_nome FROM jogadores WHERE user_id = ? LIMIT 10",
+                "SELECT personagem_nome, funcao, raiderio_score, disponibilidade, personagem_server FROM jogadores WHERE user_id = ? LIMIT 10",
                 (str(interaction.user.id),)
             )
-            personagens = [row[0] for row in await cursor.fetchall()]
+            personagens = await cursor.fetchall()
 
         if not personagens:
             return await interaction.response.send_message(
@@ -763,11 +854,30 @@ async def perfil_slash(interaction: discord.Interaction):
                 ephemeral=True
             )
 
-        view = ListaPersonagensView(personagens, interaction)
+        # Adiciona a contagem de personagens no topo do embed
+        embed = discord.Embed(
+            title="📋 Seus Personagens Registrados",
+            description=f"Você cadastrou {len(personagens)} de 4 personagens permitidos.",
+            color=discord.Color.gold()
+        )
+        for p in personagens:
+            status = "🟢 Disponível" if p[3] else "🔴 Indisponível"
+            func_icon = "🛡️" if p[1] == "Tank" else "💚" if p[1] == "Healer" else "⚔️"
+            embed.add_field(
+                name=f"{func_icon} {p[0]}",
+                value=f"Servidor: {p[4] or '—'}\nRaiderIO: {int(p[2])}\nStatus: {status}",
+                inline=False
+            )
+
+        nomes_personagens = [p[0] for p in personagens]
+        servidores = [p[4] for p in personagens]
+
+        view = PerfilView(nomes_personagens, servidores, interaction)
         await view.setup_buttons()  # Configura os botões antes de enviar
-        
+
         await interaction.response.send_message(
-            "Selecione um personagem para ver os detalhes:",
+            embed=embed,
+            content="Selecione um personagem para ver os detalhes:",
             view=view,
             ephemeral=True
         )
@@ -778,473 +888,88 @@ async def perfil_slash(interaction: discord.Interaction):
             ephemeral=True
         )
 
-class ListaPaginadaView(discord.ui.View):
-    def __init__(self, jogadores, por_pagina=8, timeout=120):
-        super().__init__(timeout=timeout)
-        self.jogadores = jogadores
-        self.por_pagina = por_pagina
-        self.pagina_atual = 0
-        self.total_paginas = max(1, (len(jogadores) + por_pagina - 1) // por_pagina)
-        self.filtro_atual = "todos"
-        
-        # Adiciona select de filtro
-        self.add_item(self.FiltroSelect())
-        
-    def get_pagina_atual(self):
-        inicio = self.pagina_atual * self.por_pagina
-        fim = inicio + self.por_pagina
-        return self.jogadores[inicio:fim]
-        
-    def criar_embed(self):
-        cor = discord.Color.blue() if self.filtro_atual == "Tank" else \
-              discord.Color.green() if self.filtro_atual == "Healer" else \
-              discord.Color.red() if self.filtro_atual == "DPS" else \
-              discord.Color.gold()
-              
-        embed = discord.Embed(
-            title=f"📋 Jogadores Disponíveis ({self.filtro_atual})",
-            color=cor
-        )
-        
-        jogadores_pagina = self.get_pagina_atual()
-        for j in jogadores_pagina:
-            icon = "🛡️" if j[2] == "Tank" else "💚" if j[2] == "Healer" else "⚔️"
-            embed.add_field(
-                name=f"{icon} {j[1]} ({j[3]})",
-                value=f"Score: {int(j[6])}\nDiscord: <@{j[0]}>",
-                inline=False
-            )
-            
-        embed.set_footer(text=f"Página {self.pagina_atual + 1}/{self.total_paginas}")
-        return embed
+class PerfilView(View):
+    def __init__(self, personagens, servidores, interaction):
+        super().__init__(timeout=60)
+        self.interaction = interaction
+        self.personagens = personagens
+        self.servidores = servidores
 
-    @discord.ui.button(label="◀️ Anterior", style=discord.ButtonStyle.gray)
-    async def anterior(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.pagina_atual > 0:
-            self.pagina_atual -= 1
-            await interaction.response.edit_message(embed=self.criar_embed(), view=self)
+    async def setup_buttons(self):
+        # Row 1: Disponibilidade geral e atualizar
+        if len(self.personagens) >= 2:
+            self.add_item(DisponibilidadeGeralButton(True, row=1))
+            self.add_item(DisponibilidadeGeralButton(False, row=1))
+        self.add_item(AtualizarPerfilButton(row=1))
 
-    @discord.ui.button(label="▶️ Próxima", style=discord.ButtonStyle.gray)
-    async def proxima(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.pagina_atual < self.total_paginas - 1:
-            self.pagina_atual += 1
-            await interaction.response.edit_message(embed=self.criar_embed(), view=self)
+        # Row 2: Botões de personagem
+        for nome in self.personagens[:10]:
+            button = PersonagemButton(nome)
+            await button.setup()
+            button.row = 2
+            self.add_item(button)
 
-    class FiltroSelect(discord.ui.Select):
-        def __init__(self):
-            options = [
-                discord.SelectOption(label="Todos", value="todos", emoji="📋"),
-                discord.SelectOption(label="Tank", value="Tank", emoji="🛡️"),
-                discord.SelectOption(label="Healer", value="Healer", emoji="💚"),
-                discord.SelectOption(label="DPS", value="DPS", emoji="⚔️")
-            ]
-            super().__init__(
-                placeholder="Filtrar por função...",
-                options=options
-            )
-
-        async def callback(self, interaction: discord.Interaction):
-            view: ListaPaginadaView = self.view
-            view.filtro_atual = self.values[0]
-            
-            if view.filtro_atual != "todos":
-                view.jogadores = [j for j in view.jogadores if j[2] == view.filtro_atual]
-            
-            view.pagina_atual = 0
-            view.total_paginas = max(1, (len(view.jogadores) + view.por_pagina - 1) // view.por_pagina)
-            
-            await interaction.response.edit_message(embed=view.criar_embed(), view=view)
-
-class ListaDisponiveisView(discord.ui.View):
-    def __init__(self, jogadores, timeout=120):
-        super().__init__(timeout=timeout)
-        self.jogadores = jogadores
-        self.pagina_atual = 0
-        self.por_pagina = 8
-        self.total_paginas = max(1, (len(jogadores) + self.por_pagina - 1) // self.por_pagina)
-        self.ultimo_click = {}  # Controle de cooldown
-
-    async def _check_cooldown(self, interaction):
-        user_id = interaction.user.id
-        now = time()
-        cooldown = self.ultimo_click.get(user_id, 0)
-        if now - cooldown < BUTTON_COOLDOWN_SECONDS:
-            restante = int(BUTTON_COOLDOWN_SECONDS - (now - cooldown))
-            await interaction.response.send_message(
-                f"⏳ Aguarde {restante} segundos para usar este botão novamente.",
-                ephemeral=True
-            )
-            return False
-        self.ultimo_click[user_id] = now
-        return True
-        
-    def get_pagina_atual(self):
-        inicio = self.pagina_atual * self.por_pagina
-        fim = inicio + self.por_pagina
-        return self.jogadores[inicio:fim]
-    
-    def criar_embed(self):
-        embed = discord.Embed(
-            title="👥 Jogadores Disponíveis",
-            description="Lista de todos os jogadores prontos para M+",
-            color=discord.Color.gold()
-        )
-        
-        # Organiza jogadores por função
-        tanks = []
-        healers = []
-        dps = []
-        
-        for jogador in self.get_pagina_atual():
-            # [user_id, nome, funcao, classe, score, personagem_nome]
-            info = f"**{jogador[5]}** ({jogador[3]})\n" \
-                   f"Score: {int(jogador[4])}\n" \
-                   f"<@{jogador[0]}>\n"
-                   
-            if jogador[2] == "Tank":
-                tanks.append(info)
-            elif jogador[2] == "Healer":
-                healers.append(info)
-            else:
-                dps.append(info)
-        
-        # Adiciona campos por função
-        if tanks:
-            embed.add_field(
-                name="🛡️ Tanks",
-                value="\n".join(tanks),
-                inline=False
-            )
-        if healers:
-            embed.add_field(
-                name="💚 Healers",
-                value="\n".join(healers),
-                inline=False
-            )
-        if dps:
-            embed.add_field(
-                name="⚔️ DPS",
-                value="\n".join(dps),
-                inline=False
-            )
-            
-        embed.set_footer(text=f"Página {self.pagina_atual + 1}/{self.total_paginas}")
-        return embed
-
-    @discord.ui.button(label="◀️ Anterior", style=discord.ButtonStyle.gray)
-    async def anterior(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_cooldown(interaction):
-            return
-            
-        if self.pagina_atual > 0:
-            self.pagina_atual -= 1
-            await interaction.response.edit_message(embed=self.criar_embed(), view=self)
-
-    @discord.ui.button(label="▶️ Próxima", style=discord.ButtonStyle.gray)
-    async def proxima(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self._check_cooldown(interaction):
-            return
-            
-        if self.pagina_atual < self.total_paginas - 1:
-            self.pagina_atual += 1
-            await interaction.response.edit_message(embed=self.criar_embed(), view=self)
-
-class ListaAdminView(discord.ui.View):
-    def __init__(self, jogadores, thread, timeout=None):
-        super().__init__(timeout=timeout)
-        self.jogadores = jogadores
-        self.thread = thread
-        self.pagina_atual = 0
-        self.por_pagina = 8
-        self.total_paginas = max(1, (len(jogadores) + self.por_pagina - 1) // self.por_pagina)
-    
-    def get_pagina_atual(self):  # Adiciona este método
-        inicio = self.pagina_atual * self.por_pagina
-        fim = inicio + self.por_pagina
-        return self.jogadores[inicio:fim]
-    
-    @discord.ui.button(label="◀️ Anterior", style=discord.ButtonStyle.gray)
-    async def anterior(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.pagina_atual > 0:
-            self.pagina_atual -= 1
-            await interaction.response.edit_message(embed=self.criar_embed(), view=self)
-
-    @discord.ui.button(label="▶️ Próxima", style=discord.ButtonStyle.gray)
-    async def proxima(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.pagina_atual < self.total_paginas - 1:
-            self.pagina_atual += 1
-            await interaction.response.edit_message(embed=self.criar_embed(), view=self)
-
-    def criar_embed(self):
-        embed = discord.Embed(
-            title="📋 Painel Administrativo - Jogadores Disponíveis",
-            description="Lista de jogadores disponíveis para M+",
-            color=discord.Color.blue()
-        )
-        
-        for jogador in self.get_pagina_atual():
-            # Cria link para DM
-            dm_link = f"discord://-/users/{jogador[0]}"
-            
-            # Cria botão de convite com ID do thread
-            convite_callback = f"convite:{self.thread.id}:{jogador[0]}"
-            
-            info = (
-                f"[{jogador[5]}]({dm_link}) ({jogador[3]})\n"
-                f"Score: {int(jogador[4])} • [📨 Convidar]({convite_callback})\n\n"
-            )
-            
-            if jogador[2] == "Tank":
-                embed.add_field(name="🛡️ Tank", value=info, inline=False)
-            elif jogador[2] == "Healer":
-                embed.add_field(name="💚 Healer", value=info, inline=False)
-            else:
-                embed.add_field(name="⚔️ DPS", value=info, inline=False)
-        
-        embed.set_footer(text=f"Página {self.pagina_atual + 1}/{self.total_paginas}")
-        return embed
-
-class GerenciarTopicoView(discord.ui.View):
-    def __init__(self, thread):
-        super().__init__(timeout=None)
-        self.thread = thread
-    
-    @discord.ui.button(label="➕ Adicionar Membro", style=discord.ButtonStyle.green)
-    async def adicionar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_threads:
-            return await interaction.response.send_message(
-                "❌ Você não tem permissão para gerenciar este tópico!", 
-                ephemeral=True
-            )
-        modal = AdicionarMembroModal(self.thread)
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="➖ Remover Membro", style=discord.ButtonStyle.red)
-    async def remover(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_threads:
-            return await interaction.response.send_message(
-                "❌ Você não tem permissão para gerenciar este tópico!", 
-                ephemeral=True
-            )
-        modal = RemoverMembroModal(self.thread)
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="🗑️ Fechar Tópico", style=discord.ButtonStyle.gray)
-    async def fechar_topico(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_threads:
-            return await interaction.response.send_message(
-                "❌ Você não tem permissão para gerenciar este tópico!", 
-                ephemeral=True
-            )
-        await self.thread.edit(archived=True, locked=True)
-        await interaction.response.send_message("✅ Tópico arquivado e trancado!", ephemeral=True)
-
-class AdicionarMembroModal(discord.ui.Modal):
-    def __init__(self, thread):
-        super().__init__(title="Adicionar Membro")
-        self.thread = thread
-        self.membro = discord.ui.TextInput(
-            label="ID ou @menção do membro",
-            placeholder="Ex: 123456789 ou @usuário",
-            required=True
-        )
-        self.add_item(self.membro)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            # Tenta encontrar o membro por ID ou menção
-            membro_id = ''.join(filter(str.isdigit, self.membro.value))
-            membro = interaction.guild.get_member(int(membro_id))
-            
-            if not membro:
-                # Tenta buscar via API se não estiver em cache
-                try:
-                    membro = await interaction.guild.fetch_member(int(membro_id))
-                except discord.NotFound:
-                    return await interaction.response.send_message(
-                        "❌ Membro não encontrado!", ephemeral=True
-                    )
-            
-            # Verifica se já está no tópico
-            permissions = self.thread.permissions_for(membro)
-            if permissions.read_messages:
-                return await interaction.response.send_message(
-                    f"❌ {membro.mention} já está no tópico!", ephemeral=True
-                )
-            
-            # Adiciona ao tópico
-            await self.thread.add_user(membro)
-            await interaction.response.send_message(
-                f"✅ {membro.mention} adicionado ao tópico!", ephemeral=True
-            )
-            
-            # Notifica o membro
-            try:
-                embed = discord.Embed(
-                    title="🎮 Convite para grupo M+",
-                    description=f"Você foi adicionado a um grupo M+!\nClique para ir ao tópico: {self.thread.jump_url}",
-                    color=discord.Color.green()
-                )
-                await membro.send(embed=embed)
-            except discord.Forbidden:
-                pass  # Usuário pode ter DMs desativadas
-            
-        except Exception as e:
-            print(f"[ERRO ADICIONAR_MEMBRO] {e}")
-            await interaction.response.send_message(
-                "❌ Erro ao adicionar membro!", ephemeral=True
-            )
-
-class RemoverMembroModal(discord.ui.Modal):
-    def __init__(self, view):
-        super().__init__(title="Remover Membro")
-        self.view = view
-        self.membro = discord.ui.TextInput(
-            label="ID ou @menção do membro",
-            placeholder="Ex: 123456789 ou @usuário",
-            required=True
-        )
-        self.add_item(self.membro)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            membro_id = ''.join(filter(str.isdigit, self.membro.value))
-            membro = interaction.guild.get_member(int(membro_id))
-            
-            if not membro:
-                return await interaction.response.send_message(
-                    "❌ Membro não encontrado!", ephemeral=True
-                )
-                
-            await interaction.channel.set_permissions(membro, overwrite=None)
-            await interaction.response.send_message(
-                f"✅ {membro.mention} removido do tópico!", ephemeral=True
-            )
-            
-        except Exception as e:
-            await interaction.response.send_message(
-                "❌ Erro ao remover membro!", ephemeral=True
-            )
-
-@bot.tree.command(name="admin_listar", description="[ADM] Lista e gerencia jogadores disponíveis")
-async def admin_listar(interaction: discord.Interaction):
-    if not any(role.name == "ADM" for role in interaction.user.roles):
-        return await interaction.response.send_message(
-            "🚫 Você não tem permissão para usar este comando.",
-            ephemeral=True
+class AtualizarPerfilButton(Button):
+    def __init__(self, row=1):
+        super().__init__(
+            label="🔄 Atualizar",
+            style=discord.ButtonStyle.secondary,
+            row=row
         )
 
-    try:
-        # Cria thread com permissões corretas
-        thread = await interaction.channel.create_thread(
-            name=f"M+ Group {datetime.now().strftime('%d/%m %H:%M')}",
-            type=discord.ChannelType.public_thread,
-            auto_archive_duration=1440  # 24 horas
-        )
-        
-        # Configura permissões iniciais
-        await thread.edit(invitable=True)
-        
-        # Envia painel de controle
-        embed = discord.Embed(
-            title="🛠️ Painel de Controle",
-            description=(
-                "Use os botões abaixo para gerenciar este grupo:\n"
-                "➕ Adicionar Membro - Adiciona um jogador ao tópico\n"
-                "➖ Remover Membro - Remove um jogador do tópico\n"
-                "🗑️ Fechar Tópico - Arquiva e tranca este tópico"
-            ),
-            color=discord.Color.blue()
-        )
-        
-        await thread.send(embed=embed, view=GerenciarTopicoView(thread))
-        
-        # Lista jogadores
-        query = """
-            SELECT user_id, nome, funcao, personagem_classe, 
-                   raiderio_score, personagem_nome
-            FROM jogadores 
-            WHERE disponibilidade = 1
-            ORDER BY 
-                CASE funcao 
-                    WHEN 'Tank' THEN 1 
-                    WHEN 'Healer' THEN 2 
-                    ELSE 3 
-                END,
-                raiderio_score DESC
-        """
-        
-        async with bot.db_lock:
-            cursor = await bot.db_conn.execute(query)
-            jogadores = await cursor.fetchall()
-            
-        if not jogadores:
-            return await interaction.response.send_message(
-                "❌ Nenhum jogador disponível no momento.",
-                ephemeral=True
-            )
-            
-        view = ListaAdminView(jogadores, thread)
-        await interaction.response.send_message(
-            embed=view.criar_embed(),
-            view=view
-        )
-        
-    except Exception as e:
-        print(f"[ERRO ADMIN_LISTAR] {e}")
-        await interaction.response.send_message(
-            "❌ Erro ao listar jogadores. Tente novamente.",
-            ephemeral=True
-        )
+    async def callback(self, interaction: discord.Interaction):
+        await perfil_slash.callback(interaction)
 
 class DisponibilidadeGeralButton(Button):
-    def __init__(self, disponivel: bool):
+    def __init__(self, disponivel: bool, row=1):
         super().__init__(
             label="🟢 Todos Disponíveis" if disponivel else "🔴 Todos Indisponíveis",
-            style=discord.ButtonStyle.success if disponivel else discord.ButtonStyle.danger
+            style=discord.ButtonStyle.success if disponivel else discord.ButtonStyle.danger,
+            row=row
         )
         self.disponivel = disponivel
 
     async def callback(self, interaction: discord.Interaction):
         try:
             async with aiosqlite.connect("data/raiderio.db") as db:
-                # Atualiza todos os personagens do usuário
                 await db.execute(
                     "UPDATE jogadores SET disponibilidade = ? WHERE user_id = ?",
                     (1 if self.disponivel else 0, str(interaction.user.id))
                 )
                 await db.commit()
-                
-                # Busca dados atualizados
                 cursor = await db.execute(
-                    "SELECT personagem_nome, personagem_classe, funcao, disponibilidade "
-                    "FROM jogadores WHERE user_id = ?",
+                    "SELECT personagem_nome, funcao, raiderio_score, disponibilidade, personagem_server FROM jogadores WHERE user_id = ? LIMIT 10",
                     (str(interaction.user.id),)
                 )
                 personagens = await cursor.fetchall()
 
-            # Cria embed com resultado
             embed = discord.Embed(
+                title="📋 Seus Personagens Registrados",
                 color=discord.Color.green() if self.disponivel else discord.Color.red()
             )
-
             for p in personagens:
-                status = "🟢" if self.disponivel else "🔴"
+                status = "🟢 Disponível" if p[3] else "🔴 Indisponível"
+                func_icon = "🛡️" if p[1] == "Tank" else "💚" if p[1] == "Healer" else "⚔️"
                 embed.add_field(
-                    name=f"{status} {p[0]}",
-                    value=f"Classe: {p[1]}\nFunção: {p[2]}",
-                    inline=True
+                    name=f"{func_icon} {p[0]}",
+                    value=f"Servidor: {p[4] or '—'}\nScore Raider.IO: {int(p[2])}\nStatus: {status}",
+                    inline=False
                 )
+
+            nomes_personagens = [p[0] for p in personagens]
+            servidores = [p[4] for p in personagens]
+            view = PerfilView(nomes_personagens, servidores, interaction)
+            await view.setup_buttons()
 
             await interaction.response.edit_message(
                 embed=embed,
-                view=ListaPersonagensView(self.view.personagens, interaction)
+                view=view,
+                content="Selecione um personagem para ver os detalhes:"
             )
-
         except Exception as e:
             print(f"[ERRO DISPONIBILIDADE_GERAL] {e}")
             await interaction.response.send_message(
-                "❌ Erro ao atualizar disponibilidade.", 
+                "❌ Erro ao atualizar disponibilidade.",
                 ephemeral=True
             )
 
