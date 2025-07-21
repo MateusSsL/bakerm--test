@@ -1,0 +1,439 @@
+import discord
+import os
+import asyncio
+import aiosqlite
+import aiohttp
+from datetime import datetime
+from discord.ext import commands
+from discord.ui import View, Select, Modal, TextInput, Button
+from dotenv import load_dotenv
+from typing import Optional
+
+# Carrega variáveis de ambiente
+load_dotenv()
+
+# --- CLASSES DE VIEW COM PROTEÇÃO CONTRA INTERFERÊNCIA ---
+
+class PrivateView(View):
+    """Classe base para todas as views privadas"""
+    def __init__(self, ctx):
+        super().__init__(timeout=300)  # 5 minutos de timeout
+        self.autor_id = ctx.author.id
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.autor_id:
+            await interaction.response.send_message(
+                "🚫 Você não pode interagir com este menu! Use `!cadastrar` para iniciar seu próprio cadastro.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+class CadastroView(PrivateView):
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self.ctx = ctx
+        self.user_id = str(ctx.author.id)
+        self.nome = ctx.author.name
+        self.funcao = None
+        self.armadura = None
+        self.raiderio_url = None
+        self.raiderio_score = None
+        self.personagem_nome = None
+        self.personagem_classe = None
+        
+        # Botão de início com proteção
+        self.add_item(Button(
+            label="Iniciar Cadastro", 
+            style=discord.ButtonStyle.primary,
+            custom_id="iniciar_cadastro"
+        ))
+
+    async def iniciar_cadastro(self, interaction: discord.Interaction):
+        if not await self.interaction_check(interaction):
+            return
+            
+        self.clear_items()
+        self.add_item(FuncaoSelect(self))
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.danger, row=4)
+    async def cancelar(self, interaction: discord.Interaction, button: Button):
+        if await self.interaction_check(interaction):
+            await interaction.response.edit_message(
+                content="Cadastro cancelado.",
+                view=None
+            )
+            self.stop()
+
+# 2. Depois definimos ConfirmarFuncaoButton que depende de CadastroView
+class ConfirmarFuncaoButton(Button):
+    def __init__(self, funcao: str, cadastro_view: 'CadastroView'):
+        super().__init__(label="Confirmar", style=discord.ButtonStyle.success)
+        self.funcao = funcao
+        self.cadastro_view = cadastro_view
+
+    async def callback(self, interaction: discord.Interaction):
+        self.cadastro_view.funcao = self.funcao
+        view = View()
+        view.add_item(ArmaduraSelect(self.funcao, self.cadastro_view))
+        await interaction.response.edit_message(
+            content=f"Função **{self.funcao}** confirmada! Agora escolha sua armadura:",
+            view=view
+        )
+
+# 3. Definimos as demais classes que dependem dessas
+class FuncaoSelect(Select):
+    def __init__(self, cadastro_view: CadastroView):
+        options = [
+            discord.SelectOption(label="Tank", emoji="🛡️"),
+            discord.SelectOption(label="Healer", emoji="➕"),
+            discord.SelectOption(label="DPS", emoji="⚔️")
+        ]
+        super().__init__(placeholder="Escolha sua função", options=options)
+        self.cadastro_view = cadastro_view
+
+    async def callback(self, interaction: discord.Interaction):
+        view = View()
+        view.add_item(ConfirmarFuncaoButton(
+            funcao=self.values[0],
+            cadastro_view=self.cadastro_view
+        ))
+        # Edita a mensagem original em vez de enviar nova
+        await interaction.response.edit_message(
+            content=f"Você escolheu: **{self.values[0]}**. Confirmar?",
+            view=view
+        )
+
+class ArmaduraSelect(Select):
+    def __init__(self, funcao, cadastro_view):
+        options = [
+            discord.SelectOption(label="Tecido", emoji="🧵"),
+            discord.SelectOption(label="Malha", emoji="🪡"),
+            discord.SelectOption(label="Couro", emoji="🥋"),
+            discord.SelectOption(label="Placa", emoji="🛡️")
+        ]
+        super().__init__(placeholder="Escolha sua armadura", options=options)
+        self.funcao = funcao
+        self.cadastro_view = cadastro_view
+
+    async def callback(self, interaction: discord.Interaction):
+        view = View()
+        view.add_item(ConfirmarArmaduraButton(
+            self.funcao, 
+            self.values[0], 
+            self.cadastro_view
+        ))
+        # Edita a mensagem original
+        await interaction.response.edit_message(
+            content=f"Armadura escolhida: **{self.values[0]}**. Confirmar?",
+            view=view
+        )
+        
+class ConfirmarArmaduraButton(Button):
+    def __init__(self, funcao, armadura, cadastro_view):
+        super().__init__(label="Confirmar", style=discord.ButtonStyle.success)
+        self.funcao = funcao
+        self.armadura = armadura
+        self.cadastro_view = cadastro_view
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(
+            RaiderIOModal(self.armadura, self.cadastro_view)
+        )
+
+class RaiderIOModal(Modal, title="Cadastro do Raider.IO"):
+    def __init__(self, armadura, cadastro_view):
+        super().__init__()
+        self.armadura = armadura
+        self.cadastro_view = cadastro_view
+        self.add_item(TextInput(
+            label="Link do Raider.IO",
+            placeholder="https://raider.io/characters/us/realm/name",
+            required=True
+        ))
+    async def on_submit(self, interaction: discord.Interaction):
+        link = self.children[0].value
+        parts = link.strip().lower().split("/")
+        try:
+            region, realm, name = parts[-3], parts[-2], parts[-1]
+
+            api_url = (
+                f"https://raider.io/api/v1/characters/profile"
+                f"?region={region}&realm={realm}&name={name}"
+                f"&fields=mythic_plus_scores_by_season:current"
+            )
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(api_url) as resp:
+                    if resp.status != 200:
+                        raise Exception("Link inválido ou jogador não encontrado.")
+
+                    data = await resp.json()
+                    score = data["mythic_plus_scores_by_season"][0]["scores"]["all"]
+                    classe = data.get("class")  # Obtém a classe do personagem
+                    nome_personagem = data.get("name")
+
+        except Exception as e:
+            return await interaction.response.send_message(
+                f"❌ Erro ao buscar Raider.IO: {e}", ephemeral=True
+            )
+
+         # Armazena todos os dados
+        self.cadastro_view.raiderio_url = link
+        self.cadastro_view.raiderio_score = score
+        self.cadastro_view.armadura = self.armadura
+        self.cadastro_view.personagem_nome = nome_personagem  # Novo
+        self.cadastro_view.personagem_classe = classe  # Novo
+
+        embed = discord.Embed(
+            title="Confirme seu Raider.IO",
+            description=f"Nick: **{nome_personagem.title()}**\nClasse: **{classe.title()}**\nServidor: **{realm.title()}**\nScore: **{score}**",
+            color=discord.Color.orange()
+        )
+
+        view = ConfirmarCadastroView(interaction, self.cadastro_view)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+class ConfirmarCadastroView(View):
+    def __init__(self, interaction, cadastro_view):
+        super().__init__(timeout=120)
+        self.interaction = interaction
+        self.cadastro_view = cadastro_view
+
+    @discord.ui.button(label="✅ Confirmar Cadastro", style=discord.ButtonStyle.success)
+    async def confirmar(self, interaction: discord.Interaction, button: Button):
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            async with aiosqlite.connect("raiderio.db") as db:
+                try:
+                    # Verifica se o personagem já existe (proteção adicional)
+                    cursor = await db.execute(
+                        "SELECT user_id FROM jogadores WHERE personagem_nome = ? AND user_id != ?",
+                        (self.cadastro_view.personagem_nome, self.cadastro_view.user_id)
+                    )
+                    if await cursor.fetchone():
+                        return await interaction.followup.send(
+                            "❌ Este personagem já está registrado por outro jogador!",
+                            ephemeral=True
+                        )
+
+                    await db.execute("""
+                        INSERT INTO jogadores 
+                        (user_id, nome, funcao, armadura, raiderio_url, raiderio_score, 
+                         personagem_nome, personagem_classe, disponibilidade)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            funcao=excluded.funcao,
+                            armadura=excluded.armadura,
+                            raiderio_url=excluded.raiderio_url,
+                            raiderio_score=excluded.raiderio_score,
+                            personagem_nome=excluded.personagem_nome,
+                            personagem_classe=excluded.personagem_classe,
+                            disponibilidade=1
+                    """, (
+                        self.cadastro_view.user_id,
+                        self.cadastro_view.nome,
+                        self.cadastro_view.funcao,
+                        self.cadastro_view.armadura,
+                        self.cadastro_view.raiderio_url,
+                        self.cadastro_view.raiderio_score,
+                        self.cadastro_view.personagem_nome,
+                        self.cadastro_view.personagem_classe
+                    ))
+                    await db.commit()
+
+                    # Mensagem de confirmação completa
+                    await interaction.followup.send(
+                        f"🎉 **Cadastro concluído com sucesso!**\n\n"
+                        f"▸ **Personagem:** {self.cadastro_view.personagem_nome}\n"
+                        f"▸ **Classe:** {self.cadastro_view.personagem_classe}\n"
+                        f"▸ **Função:** {self.cadastro_view.funcao}\n"
+                        f"▸ **Armadura:** {self.cadastro_view.armadura}\n"
+                        f"▸ **Score M+:** {int(self.cadastro_view.raiderio_score)}\n\n"
+                        f"Use `!perfil` para ver seu perfil completo ou "
+                        f"`!perfil @{interaction.user.name}` para compartilhar.",
+                        ephemeral=True
+                    )
+
+                except aiosqlite.IntegrityError as e:
+                    if "UNIQUE constraint failed: jogadores.personagem_nome" in str(e):
+                        await interaction.followup.send(
+                            "❌ **Erro:** Este personagem já está registrado no sistema!\n"
+                            "Cada personagem do Raider.IO só pode ser vinculado a uma conta Discord.",
+                            ephemeral=True
+                        )
+                    else:
+                        raise
+
+        except Exception as e:
+            print(f"ERRO NO CADASTRO: {str(e)}")
+            await interaction.followup.send(
+                f"❌ **Erro crítico:** Falha ao completar cadastro\n"
+                f"Motivo: {str(e)}\n\n"
+                f"Por favor, tente novamente ou contate um administrador.",
+                ephemeral=True
+            )
+            
+
+# --- DEPOIS DEFINIMOS A CLASSE PRINCIPAL DO BOT ---
+
+class Bot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.all()
+        super().__init__(command_prefix="!", intents=intents)
+        self.db_conn = None
+        self.db_lock = asyncio.Lock()
+
+    async def setup_hook(self):
+        self.db_conn = await aiosqlite.connect("raiderio.db")
+        await self.db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS jogadores (
+                user_id TEXT PRIMARY KEY,
+                nome TEXT,
+                funcao TEXT,
+                armadura TEXT,
+                disponibilidade INTEGER DEFAULT 0,
+                raiderio_url TEXT,
+                raiderio_score REAL,
+                personagem_nome TEXT UNIQUE, 
+                personagem_classe TEXT, 
+                ultima_atualizacao TEXT
+            )
+        """)
+        await self.db_conn.commit()
+
+bot = Bot()
+
+# --- COMANDOS INICIAL ---
+
+@bot.command()
+async def enviarboasvindas(ctx):
+    embed = discord.Embed(
+        title="🎉 Bem-vindo ao Cadastro do BakersM+!",
+        description=(
+            "Para participar dos grupos de Mythic+, você precisa se cadastrar!\n\n"
+            "📌 Informe:\n"
+            "➤ Sua **função** (Tank, Healer, DPS)\n"
+            "➤ Sua **armadura** (Placa, Couro, Malha, Tecido)\n"
+            "➤ Seu **Raider.IO**\n\n"
+            "Use `!cadastrar` para começar!"
+        ),
+        color=discord.Color.gold()
+    )
+    await ctx.send(embed=embed)
+
+# --- COMANDOS ATUALIZADOS ---
+
+active_cadastros = {}
+
+@bot.command()
+async def cadastrar(ctx):
+    """Inicia um cadastro privado"""
+    if ctx.author.id in active_cadastros:
+        return await ctx.send(
+            "Você já tem um cadastro em andamento! Complete ou cancele antes de iniciar outro.",
+            ephemeral=True
+        )
+    
+    view = CadastroView(ctx)
+    active_cadastros[ctx.author.id] = view
+    
+    # Envia como mensagem privada (ephemeral)
+    await ctx.send(
+        f"{ctx.author.mention}, iniciando seu cadastro privado...",
+        view=view,
+        ephemeral=True
+    )
+    
+    # Limpeza quando o cadastro terminar
+    view.on_stop = lambda: active_cadastros.pop(ctx.author.id, None)
+
+@bot.command()
+async def cancelar_cadastro(ctx):
+    """Cancela um cadastro em andamento"""
+    if ctx.author.id in active_cadastros:
+        view = active_cadastros.pop(ctx.author.id)
+        view.stop()
+        await ctx.send("✅ Cadastro cancelado com sucesso.", ephemeral=True)
+    else:
+        await ctx.send("❌ Você não tem nenhum cadastro em andamento.", ephemeral=True)
+
+@bot.command()
+async def perfil(ctx, membro: discord.Member = None):
+    membro = membro or ctx.author
+    async with bot.db_lock:
+        cursor = await bot.db_conn.execute(
+            "SELECT nome, funcao, armadura, disponibilidade, raiderio_url, "
+            "raiderio_score, personagem_nome, personagem_classe, ultima_atualizacao "
+            "FROM jogadores WHERE user_id = ?",
+            (str(membro.id),)
+        )
+        dados = await cursor.fetchone()
+
+    if not dados:
+        return await ctx.send("❌ Jogador não cadastrado.")
+
+    embed = discord.Embed(title=f"Perfil de {membro.display_name}", color=discord.Color.blue())
+    embed.add_field(name="Personagem", value=dados[6] or "—", inline=True)  # Nome do personagem
+    embed.add_field(name="Classe", value=dados[7] or "—", inline=True)
+    embed.add_field(name="Função", value=dados[1] or "—", inline=True)
+    embed.add_field(name="Armadura", value=dados[2] or "—", inline=True)
+    embed.add_field(name="Disponível", value="🟢 Sim" if dados[3] else "🔴 Não", inline=True)
+    embed.add_field(name="Raider.IO", value=f"[Link]({dados[4]})" if dados[4] else "—", inline=False)
+    embed.add_field(name="Score M+", value=str(int(dados[5])) if dados[5] else "—", inline=True)
+    embed.add_field(name="Última atualização", value=dados[6] or "—", inline=True)
+    await ctx.send(embed=embed)
+
+
+@bot.command()
+async def atualizario(ctx, url: str):
+    try:
+        if "raider.io/characters/" not in url:
+            return await ctx.send("❌ URL inválida. Cole o link completo do seu personagem.")
+
+        async with bot.db_lock:
+            score = await obter_score_raiderio(url)
+            if score is None:
+                return await ctx.send("❌ Falha ao buscar score. Verifique o link.")
+
+            hoje = datetime.now().date().isoformat()
+            await bot.db_conn.execute(
+                "UPDATE jogadores SET raiderio_url = ?, raiderio_score = ?, ultima_atualizacao = ? "
+                "WHERE user_id = ?",
+                (url, score, hoje, str(ctx.author.id)))
+            await bot.db_conn.commit()
+
+        await ctx.send(f"✅ Score atualizado: **{int(score)}**")
+    except Exception as e:
+        await ctx.send(f"❌ Erro: {str(e)}")
+
+
+
+# --- FUNÇÕES AUXILIARES ---
+
+async def obter_score_raiderio(url: str) -> Optional[float]:
+    try:
+        parts = url.rstrip("/").split("/")
+        region, realm, name = parts[-3], parts[-2], parts[-1]
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://raider.io/api/v1/characters/profile"
+                f"?region={region}&realm={realm}&name={name}"
+                f"&fields=mythic_plus_scores_by_season:current"
+            ) as resp:
+                data = await resp.json()
+                return data["mythic_plus_scores_by_season"][0]["scores"]["all"]
+    except:
+        return None
+
+# --- INICIALIZAÇÃO ---
+
+@bot.event
+async def on_ready():
+    print(f"✅ Bot online como {bot.user.name}")
+
+if __name__ == "__main__":
+    bot.run(os.getenv("DISCORD_TOKEN"))
